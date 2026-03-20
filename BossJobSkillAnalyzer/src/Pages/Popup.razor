@@ -1,4 +1,600 @@
 ﻿@page "/popup.html"
-@inherits BasePage
+@inject IJSRuntime JSRuntime
+@inject BossJobSkillAnalyzer.Services.ConfigStorageService ConfigStorage
+@implements IDisposable
 
-<h1>My popup page</h1>
+<div class="popup-container">
+    <div class="popup-header">
+        <h2>Boss 职位技能分析器</h2>
+    </div>
+
+    <div class="popup-content">
+        <EditForm Model="@Config" OnValidSubmit="HandleSaveConfig">
+            <DataAnnotationsValidator />
+
+            <!-- Anthropic API Key -->
+            <div class="form-group">
+                <div class="form-label-row">
+                    <label>Anthropic API Key</label>
+                    <button type="button" class="help-btn" @onclick="ShowApiKeyHelp">获取API Key</button>
+                </div>
+                <div class="input-group">
+                    <InputText type="@(!ShowApiKey ? "password" : "text")"
+                               @bind-Value="Config.ApiKey"
+                               class="form-control"
+                               placeholder="sk-ant-xxxxx" />
+                    <button type="button" class="toggle-btn" @onclick="ToggleApiKeyVisibility">
+                        <span>@(ShowApiKey ? "👁" : "🔒")</span>
+                    </button>
+                </div>
+                <ValidationMessage For="() => Config.ApiKey" />
+            </div>
+
+            <!-- API Base URL -->
+            <div class="form-group">
+                <label>API Base URL</label>
+                <InputText @bind-Value="Config.ApiBaseUrl"
+                           class="form-control"
+                           placeholder="https://api.anthropic.com" />
+                <ValidationMessage For="() => Config.ApiBaseUrl" />
+            </div>
+
+            <!-- Model -->
+            <div class="form-group">
+                <label>Model</label>
+                <InputText @bind-Value="Config.Model"
+                           class="form-control"
+                           placeholder="claude-3-5-sonnet-20241022" />
+                <ValidationMessage For="() => Config.Model" />
+            </div>
+
+            <!-- 高级设置折叠 -->
+            <details class="advanced-settings">
+                <summary>高级设置</summary>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>前几页</label>
+                        <InputNumber @bind-Value="Config.MaxPages" class="form-control" min="1" max="10" />
+                    </div>
+                    <div class="form-group">
+                        <label>超时(秒)</label>
+                        <InputNumber @bind-Value="Config.RequestTimeout" class="form-control" min="10" max="120" />
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>处理间隔(毫秒)</label>
+                    <InputNumber @bind-Value="Config.ProcessInterval" class="form-control" min="500" max="10000" step="500" />
+                </div>
+            </details>
+
+            <!-- 消息提示 -->
+            @if (!string.IsNullOrEmpty(SuccessMessage))
+            {
+                <div class="alert alert-success">@SuccessMessage</div>
+            }
+            @if (!string.IsNullOrEmpty(ErrorMessage))
+            {
+                <div class="alert alert-error">@ErrorMessage</div>
+            }
+
+            <!-- 调试信息面板 -->
+            @if (ShowDebugInfo)
+            {
+                <div class="debug-panel">
+                    <div class="debug-header">
+                        <strong>🔍 调试信息</strong>
+                        <button type="button" class="debug-close" @onclick="() => ShowDebugInfo = false">✕</button>
+                    </div>
+                    <div class="debug-content">
+                        <div class="debug-item">
+                            <span class="debug-label">API Base URL:</span>
+                            <span class="debug-value">@(!string.IsNullOrEmpty(Config.ApiBaseUrl) ? "✅ 已填写" : "❌ 未填写")</span>
+                        </div>
+                        <div class="debug-item">
+                            <span class="debug-label">API Key:</span>
+                            <span class="debug-value">@(!string.IsNullOrEmpty(Config.ApiKey) ? $"✅ 已填写 ({Config.ApiKey.Length} 字符)" : "❌ 未填写")</span>
+                        </div>
+                        <div class="debug-item">
+                            <span class="debug-label">Model:</span>
+                            <span class="debug-value">@(!string.IsNullOrEmpty(Config.Model) ? $"✅ {Config.Model}" : "❌ 未填写")</span>
+                        </div>
+                        <div class="debug-item">
+                            <span class="debug-label">前几页:</span>
+                            <span class="debug-value">@Config.MaxPages</span>
+                        </div>
+                    </div>
+                </div>
+            }
+
+            <!-- 调试按钮 -->
+            <div class="debug-toggle">
+                <button type="button" class="debug-btn" @onclick="() => ShowDebugInfo = !ShowDebugInfo">
+                    @if (ShowDebugInfo)
+                    {
+                        <span>🔼 隐藏调试信息</span>
+                    }
+                    else
+                    {
+                        <span>🔽 显示调试信息</span>
+                    }
+                </button>
+            </div>
+
+            <!-- 按钮组 -->
+            <div class="button-group">
+                <button type="submit" class="btn btn-primary" disabled="@IsSaving">
+                    @if (IsSaving)
+                    {
+                        <span>⏳ 保存中...</span>
+                    }
+                    else
+                    {
+                        <span>💾 保存配置</span>
+                    }
+                </button>
+                <button type="button" class="btn btn-secondary" disabled="@IsSaving" @onclick="HandleCancel">取消</button>
+            </div>
+        </EditForm>
+    </div>
+</div>
+
+<!-- API Key帮助弹窗 -->
+@if (ShowApiKeyModal)
+{
+    <div class="modal-overlay" @onclick="CloseApiKeyModal">
+        <div class="modal-content" @onclick:stopPropagation>
+            <h3>如何获取 Anthropic API Key</h3>
+            <div class="help-section">
+                <p><strong>方式1：使用 Anthropic 官方</strong></p>
+                <ol class="help-steps">
+                    <li>访问 <a href="https://console.anthropic.com/" target="_blank">console.anthropic.com</a></li>
+                    <li>注册/登录账号</li>
+                    <li>进入 API Keys 页面</li>
+                    <li>点击 Create Key 创建密钥</li>
+                    <li>复制密钥（格式：sk-ant-xxxxx）</li>
+                </ol>
+            </div>
+            <div class="help-section">
+                <p><strong>方式2：使用国内代理（推荐）</strong></p>
+                <p>您也可以使用兼容 OpenAI 格式的第三方代理服务，如 OneAPI、New API 等。</p>
+            </div>
+            <button class="btn btn-primary" @onclick="CloseApiKeyModal">知道了</button>
+        </div>
+    </div>
+}
+
+<style>
+    * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+    }
+
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #f5f5f5;
+    }
+
+    .popup-container {
+        width: 500px;
+        min-height: 400px;
+        background: white;
+    }
+
+    .popup-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 20px;
+        text-align: center;
+    }
+
+    .popup-header h2 {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 600;
+    }
+
+    .popup-content {
+        padding: 20px;
+    }
+
+    .form-group {
+        margin-bottom: 16px;
+    }
+
+    .form-label-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+    }
+
+    .form-label-row label {
+        font-size: 13px;
+        font-weight: 500;
+        color: #333;
+    }
+
+    .form-group > label {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 13px;
+        font-weight: 500;
+        color: #333;
+    }
+
+    .form-control {
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        font-size: 14px;
+        font-family: inherit;
+        transition: border-color 0.2s;
+    }
+
+    .form-control:focus {
+        outline: none;
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
+
+    textarea.form-control {
+        resize: vertical;
+        min-height: 60px;
+    }
+
+    .input-group {
+        display: flex;
+        gap: 6px;
+    }
+
+    .input-group .form-control {
+        flex: 1;
+    }
+
+    .toggle-btn {
+        padding: 10px 12px;
+        background: #f5f5f5;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 16px;
+        transition: background 0.2s;
+    }
+
+    .toggle-btn:hover {
+        background: #e8e8e8;
+    }
+
+    .help-btn {
+        padding: 4px 10px;
+        background: #667eea;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        font-size: 11px;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+
+    .help-btn:hover {
+        background: #5568d3;
+    }
+
+    .advanced-settings {
+        margin: 16px 0;
+        border: 1px solid #e0e0e0;
+        border-radius: 6px;
+        padding: 12px;
+    }
+
+    .advanced-settings summary {
+        cursor: pointer;
+        font-size: 13px;
+        font-weight: 500;
+        color: #667eea;
+        user-select: none;
+    }
+
+    .advanced-settings summary:hover {
+        color: #5568d3;
+    }
+
+    .form-row {
+        display: flex;
+        gap: 12px;
+        margin-top: 12px;
+    }
+
+    .form-row .form-group {
+        flex: 1;
+    }
+
+    .alert {
+        padding: 14px 16px;
+        border-radius: 8px;
+        font-size: 13px;
+        margin-bottom: 16px;
+        line-height: 1.5;
+        font-weight: 500;
+    }
+
+    .alert-success {
+        background: #d4edda;
+        color: #155724;
+        border: 2px solid #c3e6cb;
+        box-shadow: 0 2px 8px rgba(40, 167, 69, 0.15);
+    }
+
+    .alert-error {
+        background: #f8d7da;
+        color: #721c24;
+        border: 2px solid #f5c6cb;
+        box-shadow: 0 2px 8px rgba(220, 53, 69, 0.15);
+    }
+
+    .debug-toggle {
+        margin-bottom: 12px;
+    }
+
+    .debug-btn {
+        width: 100%;
+        padding: 8px 12px;
+        background: #f8f9fa;
+        color: #6c757d;
+        border: 1px dashed #dee2e6;
+        border-radius: 4px;
+        font-size: 12px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .debug-btn:hover {
+        background: #e9ecef;
+        border-color: #adb5bd;
+    }
+
+    .debug-panel {
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 6px;
+        margin-bottom: 12px;
+        overflow: hidden;
+    }
+
+    .debug-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 12px;
+        background: #e9ecef;
+        border-bottom: 1px solid #dee2e6;
+        font-size: 13px;
+    }
+
+    .debug-close {
+        background: none;
+        border: none;
+        cursor: pointer;
+        font-size: 14px;
+        padding: 2px 6px;
+        color: #6c757d;
+    }
+
+    .debug-close:hover {
+        color: #343a40;
+    }
+
+    .debug-content {
+        padding: 12px;
+    }
+
+    .debug-item {
+        display: flex;
+        justify-content: space-between;
+        padding: 6px 0;
+        font-size: 12px;
+        border-bottom: 1px solid #e9ecef;
+    }
+
+    .debug-item:last-child {
+        border-bottom: none;
+    }
+
+    .debug-label {
+        color: #6c757d;
+        font-weight: 500;
+    }
+
+    .debug-value {
+        color: #212529;
+    }
+
+    .button-group {
+        display: flex;
+        gap: 10px;
+        margin-top: 20px;
+    }
+
+    .btn {
+        flex: 1;
+        padding: 12px 20px;
+        border: none;
+        border-radius: 6px;
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+    }
+
+    .btn-primary {
+        background: #667eea;
+        color: white;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+        background: #5568d3;
+    }
+
+    .btn-secondary {
+        background: #f5f5f5;
+        color: #333;
+        border: 1px solid #ddd;
+    }
+
+    .btn-secondary:hover:not(:disabled) {
+        background: #e8e8e8;
+    }
+
+    .modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+    }
+
+    .modal-content {
+        background: white;
+        padding: 24px;
+        border-radius: 12px;
+        width: 450px;
+        max-width: 90%;
+        max-height: 80vh;
+        overflow-y: auto;
+    }
+
+    .modal-content h3 {
+        margin: 0 0 16px 0;
+        font-size: 18px;
+        color: #333;
+    }
+
+    .help-section {
+        margin-bottom: 16px;
+    }
+
+    .help-section p {
+        margin: 8px 0;
+        font-size: 14px;
+        color: #666;
+    }
+
+    .help-steps {
+        margin: 8px 0;
+        padding-left: 20px;
+        font-size: 13px;
+        color: #555;
+        line-height: 1.6;
+    }
+
+    .help-steps li {
+        margin-bottom: 6px;
+    }
+
+    .help-steps code {
+        background: #f5f5f5;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-family: 'Courier New', monospace;
+        font-size: 12px;
+    }
+
+    .help-steps a {
+        color: #667eea;
+        text-decoration: none;
+    }
+
+    .help-steps a:hover {
+        text-decoration: underline;
+    }
+</style>
+
+@code {
+    private BossJobSkillAnalyzer.Models.PluginConfig Config = new();
+    private bool ShowApiKey = false;
+    private bool ShowApiKeyModal = false;
+    private bool IsSaving = false;
+    private bool ShowDebugInfo = false;
+    private string SuccessMessage = string.Empty;
+    private string ErrorMessage = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadConfigAsync();
+    }
+
+    private async Task LoadConfigAsync()
+    {
+        Config = await ConfigStorage.LoadConfigAsync();
+
+        // 如果配置为空，自动显示调试信息
+        if (string.IsNullOrEmpty(Config.ApiBaseUrl) &&
+            string.IsNullOrEmpty(Config.ApiKey) &&
+            string.IsNullOrEmpty(Config.Model))
+        {
+            ShowDebugInfo = true;
+        }
+    }
+
+    private async Task HandleSaveConfig()
+    {
+        IsSaving = true;
+        SuccessMessage = string.Empty;
+        ErrorMessage = string.Empty;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            await ConfigStorage.SaveConfigAsync(Config);
+            SuccessMessage = "✅ 配置已保存！您可以关闭此窗口，访问 Boss 直聘搜索页面开始使用。";
+            ErrorMessage = string.Empty;
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"❌ 保存失败: {ex.Message}";
+            SuccessMessage = string.Empty;
+        }
+        finally
+        {
+            IsSaving = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void HandleCancel()
+    {
+        // popup不能通过JS关闭，用户需要手动点击外部或ESC关闭
+    }
+
+    private void ToggleApiKeyVisibility()
+    {
+        ShowApiKey = !ShowApiKey;
+    }
+
+    private void ShowApiKeyHelp()
+    {
+        ShowApiKeyModal = true;
+    }
+
+    private void CloseApiKeyModal()
+    {
+        ShowApiKeyModal = false;
+    }
+
+    public void Dispose()
+    {
+        // 清理资源
+    }
+}
