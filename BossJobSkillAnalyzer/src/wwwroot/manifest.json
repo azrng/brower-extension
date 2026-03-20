@@ -1,0 +1,50 @@
+﻿{
+  "manifest_version": 3,
+  "name": "Boss 职位技能分析",
+  "description": "在 Boss 直聘搜索页自动分析职位技能要求，支持 AI 智能识别和分类",
+  "version": "0.1.0",
+  "background": {
+    "service_worker": "content/BackgroundWorker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.zhipin.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.zhipin.com/*"
+      ],
+      "js": [
+        "content/ContentScript.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "framework/*",
+        "content/*"
+      ],
+      "matches": [
+        "https://www.zhipin.com/*"
+      ]
+    }
+  ]
+}

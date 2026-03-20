@@ -1,0 +1,862 @@
+@inject IJSRuntime JSRuntime
+@inject BossJobSkillAnalyzer.Services.ConfigStorageService ConfigStorage
+@inject BossJobSkillAnalyzer.Services.OpenAIService OpenAIService
+@implements IDisposable
+
+<div class="sidebar-container @GetSidebarClass()">
+    <!-- 顶部标题区 -->
+    <div class="sidebar-header">
+        <div class="header-title">
+            <h3>职位技能分析</h3>
+            @if (Progress != null)
+            {
+                <span class="status-badge @GetStatusClass()">@GetStatusText()</span>
+            }
+        </div>
+        <div class="header-actions">
+            <button class="icon-btn" @onclick="ToggleSidebar" title="收起/展开">
+                <span>@(IsExpanded ? "◀" : "▶")</span>
+            </button>
+            <button class="icon-btn" @onclick="CloseSidebar" title="关闭">
+                <span>✕</span>
+            </button>
+        </div>
+    </div>
+
+    @if (IsExpanded)
+    {
+        <!-- 任务控制区 -->
+        <div class="sidebar-section">
+            <div class="button-group">
+                <button class="primary-btn" disabled="@IsTaskRunning" @onclick="StartTask">
+                    开始识别
+                </button>
+                <button class="secondary-btn" disabled="@(Progress?.Status == AnalysisStatus.NotStarted || Progress?.Status == AnalysisStatus.Completed)" @onclick="StopTask">
+                    停止任务
+                </button>
+            </div>
+        </div>
+
+        <!-- 参数配置区 -->
+        <div class="sidebar-section">
+            <h4>参数配置</h4>
+            <EditForm Model="@Config" OnValidSubmit="SaveConfig">
+                <DataAnnotationsValidator />
+
+                <div class="form-group">
+                    <label>API Base URL *</label>
+                    <InputText @bind-Value="Config.ApiBaseUrl" class="form-control"
+                               placeholder="https://api.openai.com/v1" />
+                    <ValidationMessage For="() => Config.ApiBaseUrl" />
+                </div>
+
+                <div class="form-group">
+                    <label>API Key *</label>
+                    <div class="input-group">
+                        <InputText type="@(!ShowApiKey ? "password" : "text")"
+                                   @bind-Value="Config.ApiKey" class="form-control" />
+                        <button type="button" class="toggle-btn" @onclick="ToggleApiKeyVisibility">
+                            <span>@(ShowApiKey ? "👁" : "🔒")</span>
+                        </button>
+                    </div>
+                    <ValidationMessage For="() => Config.ApiKey" />
+                </div>
+
+                <div class="form-group">
+                    <label>Model *</label>
+                    <InputText @bind-Value="Config.Model" class="form-control"
+                               placeholder="gpt-3.5-turbo" />
+                    <ValidationMessage For="() => Config.Model" />
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>前几页 *</label>
+                        <InputNumber @bind-Value="Config.MaxPages" class="form-control" min="1" />
+                    </div>
+                    <div class="form-group">
+                        <label>超时(秒) *</label>
+                        <InputNumber @bind-Value="Config.RequestTimeout" class="form-control" min="1" />
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>处理间隔(毫秒) *</label>
+                    <InputNumber @bind-Value="Config.ProcessInterval" class="form-control" min="0" />
+                </div>
+
+                <button type="submit" class="save-btn">保存配置</button>
+            </EditForm>
+        </div>
+
+        <!-- 任务进度区 -->
+        @if (Progress != null && Progress.Status != AnalysisStatus.NotStarted)
+        {
+            <div class="sidebar-section">
+                <h4>任务进度</h4>
+                <div class="progress-info">
+                    <div class="progress-item">
+                        <span>当前阶段：</span>
+                        <span class="stage-text">@Progress.Stage.GetDisplayName()</span>
+                    </div>
+                    <div class="progress-item">
+                        <span>页面进度：</span>
+                        <span>@Progress.CurrentPage / @Progress.TotalPages</span>
+                    </div>
+                    <div class="progress-item">
+                        <span>职位进度：</span>
+                        <span>@Progress.ProcessedJobs / @Progress.TotalJobs</span>
+                    </div>
+                    @if (!string.IsNullOrEmpty(Progress.LastMessage))
+                    {
+                        <div class="progress-message">@Progress.LastMessage</div>
+                    }
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: @GetProgressPercent()%">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+
+        <!-- 结果展示区 -->
+        @if (Progress?.Result != null)
+        {
+            <div class="sidebar-section">
+                <h4>分析结果</h4>
+
+                <!-- 技能关键词 -->
+                <div class="result-section">
+                    <h5>技能关键词</h5>
+                    <div class="keywords-list">
+                        @foreach (var keyword in Progress.Result.Keywords.Take(20))
+                        {
+                            <span class="keyword-tag">@keyword</span>
+                        }
+                        @if (Progress.Result.Keywords.Count > 20)
+                        {
+                            <span class="more-tag">...等 @Progress.Result.Keywords.Count 个</span>
+                        }
+                    </div>
+                </div>
+
+                <!-- 分类汇总 -->
+                @if (Progress.Result.Categories.Any())
+                {
+                    <div class="result-section">
+                        <h5>技能分类</h5>
+                        @foreach (var category in Progress.Result.Categories)
+                        {
+                            <div class="category-group">
+                                <strong>@category.Name</strong>
+                                <div class="category-skills">
+                                    @foreach (var skill in category.Skills)
+                                    {
+                                        <span class="skill-tag">@skill</span>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+
+                <!-- 技能频次 -->
+                @if (Progress.Result.Frequencies.Any())
+                {
+                    <div class="result-section">
+                        <h5>技能频次</h5>
+                        <div class="frequencies-list">
+                            @foreach (var freq in Progress.Result.Frequencies.OrderByDescending(x => x.Value).Take(10))
+                            {
+                                <div class="frequency-item">
+                                    <span class="freq-name">@freq.Key</span>
+                                    <span class="freq-count">@freq.Value 次</span>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+
+                <!-- 同义词归一 -->
+                @if (Progress.Result.SynonymMappings.Any())
+                {
+                    <div class="result-section">
+                        <h5>同义词归一</h5>
+                        <div class="synonyms-list">
+                            @foreach (var mapping in Progress.Result.SynonymMappings.Take(10))
+                            {
+                                <div class="synonym-item">
+                                    <span class="original-word">@mapping.Key</span>
+                                    <span class="arrow">→</span>
+                                    <span class="standard-word">@mapping.Value</span>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+
+                <!-- 总体总结 -->
+                @if (!string.IsNullOrEmpty(Progress.Result.Summary))
+                {
+                    <div class="result-section">
+                        <h5>总体总结</h5>
+                        <p class="summary-text">@Progress.Result.Summary</p>
+                    </div>
+                }
+            </div>
+        }
+
+        <!-- 导出区 -->
+        @if (Progress?.Result != null)
+        {
+            <div class="sidebar-section">
+                <button class="export-btn" @onclick="ExportJson">导出 JSON</button>
+            </div>
+        }
+
+        <!-- 状态提示区 -->
+        @if (!string.IsNullOrEmpty(ErrorMessage))
+        {
+            <div class="sidebar-section">
+                <div class="alert alert-error">@ErrorMessage</div>
+            </div>
+        }
+
+        @if (!string.IsNullOrEmpty(SuccessMessage))
+        {
+            <div class="sidebar-section">
+                <div class="alert alert-success">@SuccessMessage</div>
+            </div>
+        }
+    }
+</div>
+
+<style>
+    .sidebar-container {
+        width: 400px;
+        height: 100vh;
+        background: white;
+        display: flex;
+        flex-direction: column;
+        transition: transform 0.3s ease;
+    }
+
+    .sidebar-container.collapsed {
+        transform: translateX(100%);
+    }
+
+    .sidebar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 16px;
+        border-bottom: 1px solid #e0e0e0;
+        background: #f5f5f5;
+    }
+
+    .header-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .header-title h3 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+    }
+
+    .status-badge {
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 500;
+    }
+
+    .status-not-started { background: #e0e0e0; color: #666; }
+    .status-running { background: #e3f2fd; color: #1976d2; }
+    .status-completed { background: #e8f5e9; color: #388e3c; }
+    .status-stopped { background: #fff3e0; color: #f57c00; }
+    .status-failed { background: #ffebee; color: #d32f2f; }
+
+    .header-actions {
+        display: flex;
+        gap: 8px;
+    }
+
+    .icon-btn {
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 4px 8px;
+        font-size: 16px;
+    }
+
+    .sidebar-section {
+        padding: 16px;
+        border-bottom: 1px solid #e0e0e0;
+    }
+
+    .sidebar-section h4 {
+        margin: 0 0 12px 0;
+        font-size: 14px;
+        font-weight: 600;
+        color: #333;
+    }
+
+    .button-group {
+        display: flex;
+        gap: 8px;
+    }
+
+    .primary-btn, .secondary-btn, .save-btn, .export-btn {
+        flex: 1;
+        padding: 10px 16px;
+        border: none;
+        border-radius: 4px;
+        font-size: 14px;
+        cursor: pointer;
+        font-weight: 500;
+    }
+
+    .primary-btn {
+        background: #1976d2;
+        color: white;
+    }
+
+    .primary-btn:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+    }
+
+    .secondary-btn {
+        background: #f5f5f5;
+        color: #333;
+        border: 1px solid #ddd;
+    }
+
+    .form-group {
+        margin-bottom: 12px;
+    }
+
+    .form-group label {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 12px;
+        font-weight: 500;
+        color: #666;
+    }
+
+    .form-control {
+        width: 100%;
+        padding: 8px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+    }
+
+    .input-group {
+        display: flex;
+        gap: 4px;
+    }
+
+    .input-group .form-control {
+        flex: 1;
+    }
+
+    .toggle-btn {
+        padding: 8px;
+        background: #f5f5f5;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+
+    .form-row {
+        display: flex;
+        gap: 12px;
+    }
+
+    .form-row .form-group {
+        flex: 1;
+    }
+
+    .progress-info {
+        background: #f9f9f9;
+        padding: 12px;
+        border-radius: 4px;
+    }
+
+    .progress-item {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 8px;
+        font-size: 13px;
+    }
+
+    .stage-text {
+        font-weight: 500;
+        color: #1976d2;
+    }
+
+    .progress-bar {
+        height: 4px;
+        background: #e0e0e0;
+        border-radius: 2px;
+        overflow: hidden;
+        margin-top: 8px;
+    }
+
+    .progress-fill {
+        height: 100%;
+        background: #1976d2;
+        transition: width 0.3s ease;
+    }
+
+    .result-section {
+        margin-bottom: 16px;
+    }
+
+    .result-section h5 {
+        margin: 0 0 8px 0;
+        font-size: 13px;
+        font-weight: 600;
+        color: #333;
+    }
+
+    .keywords-list, .category-skills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .keyword-tag, .skill-tag {
+        padding: 4px 8px;
+        background: #e3f2fd;
+        color: #1976d2;
+        border-radius: 4px;
+        font-size: 12px;
+    }
+
+    .category-group {
+        margin-bottom: 12px;
+    }
+
+    .category-group strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 12px;
+        color: #666;
+    }
+
+    .frequencies-list {
+        background: #f9f9f9;
+        padding: 8px;
+        border-radius: 4px;
+    }
+
+    .frequency-item {
+        display: flex;
+        justify-content: space-between;
+        padding: 4px 0;
+        font-size: 12px;
+    }
+
+    .freq-name {
+        color: #333;
+    }
+
+    .freq-count {
+        color: #666;
+        font-weight: 500;
+    }
+
+    .synonyms-list {
+        background: #f9f9f9;
+        padding: 8px;
+        border-radius: 4px;
+    }
+
+    .synonym-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 0;
+        font-size: 12px;
+    }
+
+    .original-word {
+        color: #f57c00;
+    }
+
+    .arrow {
+        color: #999;
+    }
+
+    .standard-word {
+        color: #388e3c;
+        font-weight: 500;
+    }
+
+    .summary-text {
+        margin: 0;
+        padding: 12px;
+        background: #f9f9f9;
+        border-radius: 4px;
+        font-size: 13px;
+        line-height: 1.6;
+        color: #333;
+    }
+
+    .alert {
+        padding: 12px;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+
+    .alert-error {
+        background: #ffebee;
+        color: #d32f2f;
+        border: 1px solid #ffcdd2;
+    }
+
+    .alert-success {
+        background: #e8f5e9;
+        color: #388e3c;
+        border: 1px solid #c8e6c9;
+    }
+</style>
+
+@code {
+    private BossJobSkillAnalyzer.Models.PluginConfig Config = new();
+    private BossJobSkillAnalyzer.Models.TaskProgress? Progress = new();
+    private bool IsExpanded = true;
+    private bool ShowApiKey = false;
+    private bool IsTaskRunning = false;
+    private string ErrorMessage = string.Empty;
+    private string SuccessMessage = string.Empty;
+    private System.Threading.CancellationTokenSource? _cancellationTokenSource;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadConfigAsync();
+    }
+
+    private async Task LoadConfigAsync()
+    {
+        Config = await ConfigStorage.LoadConfigAsync();
+    }
+
+    private async Task SaveConfig()
+    {
+        await ConfigStorage.SaveConfigAsync(Config);
+        SuccessMessage = "配置已保存";
+        await Task.Delay(2000);
+        SuccessMessage = string.Empty;
+    }
+
+    private void ToggleApiKeyVisibility()
+    {
+        ShowApiKey = !ShowApiKey;
+    }
+
+    private void ToggleSidebar()
+    {
+        IsExpanded = !IsExpanded;
+    }
+
+    private void CloseSidebar()
+    {
+        IsExpanded = false;
+    }
+
+    private string GetSidebarClass()
+    {
+        return IsExpanded ? "" : "collapsed";
+    }
+
+    private string GetStatusClass()
+    {
+        if (Progress == null) return "status-not-started";
+
+        return Progress.Status switch
+        {
+            AnalysisStatus.NotStarted => "status-not-started",
+            AnalysisStatus.Running => "status-running",
+            AnalysisStatus.Completed => "status-completed",
+            AnalysisStatus.Stopped => "status-stopped",
+            AnalysisStatus.Failed => "status-failed",
+            _ => "status-not-started"
+        };
+    }
+
+    private string GetStatusText()
+    {
+        if (Progress == null) return "未开始";
+
+        return Progress.Status switch
+        {
+            AnalysisStatus.NotStarted => "未开始",
+            AnalysisStatus.Running => "运行中",
+            AnalysisStatus.Completed => "已完成",
+            AnalysisStatus.Stopped => "已停止",
+            AnalysisStatus.Failed => "失败",
+            _ => "未知"
+        };
+    }
+
+    private string GetProgressPercent()
+    {
+        if (Progress == null || Progress.TotalJobs == 0) return "0";
+        return ((double)Progress.ProcessedJobs / Progress.TotalJobs * 100).ToString("F0");
+    }
+
+    private async Task StartTask()
+    {
+        if (!Config.IsValid())
+        {
+            ErrorMessage = "请先填写完整的配置信息";
+            return;
+        }
+
+        _cancellationTokenSource = new System.Threading.CancellationTokenSource();
+        IsTaskRunning = true;
+        ErrorMessage = string.Empty;
+
+        Progress = new BossJobSkillAnalyzer.Models.TaskProgress
+        {
+            Status = AnalysisStatus.Running,
+            Stage = TaskStage.ReadingJobList,
+            CurrentPage = 0,
+            TotalPages = Config.MaxPages,
+            ProcessedJobs = 0,
+            TotalJobs = 0
+        };
+
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            await ExecuteTaskAsync(_cancellationTokenSource.Token);
+        }
+        catch (Exception ex)
+        {
+            Progress.Status = AnalysisStatus.Failed;
+            ErrorMessage = $"任务失败: {ex.Message}";
+        }
+        finally
+        {
+            IsTaskRunning = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task StopTask()
+    {
+        _cancellationTokenSource?.Cancel();
+        if (Progress != null)
+        {
+            Progress.Status = AnalysisStatus.Stopped;
+        }
+        IsTaskRunning = false;
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ExecuteTaskAsync(CancellationToken cancellationToken)
+    {
+        var allJobs = new List<BossJobSkillAnalyzer.Models.JobInfo>();
+        var individualResults = new List<BossJobSkillAnalyzer.Models.SkillAnalysisResult>();
+
+        // 收集所有职位信息
+        for (int page = 1; page <= Config.MaxPages && !cancellationToken.IsCancellationRequested; page++)
+        {
+            Progress!.CurrentPage = page;
+            Progress.Stage = TaskStage.ReadingJobList;
+            Progress.LastMessage = $"正在读取第 {page} 页职位列表";
+            await InvokeAsync(StateHasChanged);
+
+            // 调用 Content Script 提取职位列表
+            var jobs = await ExtractJobListFromPage();
+            if (jobs.Count == 0)
+            {
+                Progress.LastMessage = "第 " + page + " 页未找到职位，任务结束";
+                break;
+            }
+
+            allJobs.AddRange(jobs);
+            Progress.TotalJobs = allJobs.Count;
+            await InvokeAsync(StateHasChanged);
+
+            // 如果不是最后一页，翻页
+            if (page < Config.MaxPages)
+            {
+                await Task.Delay(Config.ProcessInterval, cancellationToken);
+                await GoToNextPage();
+            }
+        }
+
+        // 处理每个职位
+        for (int i = 0; i < allJobs.Count && !cancellationToken.IsCancellationRequested; i++)
+        {
+            var job = allJobs[i];
+            Progress!.ProcessedJobs = i;
+            Progress.Stage = TaskStage.OpeningJobDetail;
+            Progress.LastMessage = $"正在处理职位 {i + 1}/{allJobs.Count}: {job.Title}";
+            await InvokeAsync(StateHasChanged);
+
+            try
+            {
+                // 打开详情页
+                var tabId = await OpenDetailTab(job.Url);
+                if (tabId == null)
+                {
+                    job.ErrorMessage = "无法打开详情页";
+                    continue;
+                }
+
+                await Task.Delay(Config.ProcessInterval, cancellationToken);
+
+                // 提取详情
+                Progress.Stage = TaskStage.ExtractingJobContent;
+                await InvokeAsync(StateHasChanged);
+
+                var detail = await ExtractJobDetail();
+                job.Experience = detail.Experience;
+                job.Description = detail.Description;
+                job.IsExtracted = true;
+
+                // AI 分析
+                Progress.Stage = TaskStage.CallingAI;
+                await InvokeAsync(StateHasChanged);
+
+                var result = await OpenAIService.AnalyzeSingleJobAsync(job, Config);
+                job.AnalysisCompleted = true;
+                individualResults.Add(result);
+
+                // 关闭标签页
+                await CloseTab(tabId.Value);
+
+                await Task.Delay(Config.ProcessInterval, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                job.ErrorMessage = ex.Message;
+                // 单个职位失败，继续处理下一个
+            }
+        }
+
+        // 汇总分析
+        if (individualResults.Any() && !cancellationToken.IsCancellationRequested)
+        {
+            Progress!.Stage = TaskStage.AggregatingResults;
+            Progress.LastMessage = "正在汇总分析结果";
+            await InvokeAsync(StateHasChanged);
+
+            var finalResult = await OpenAIService.AnalyzeAggregatedResultsAsync(individualResults, Config);
+            Progress.Result = finalResult;
+        }
+
+        Progress!.Status = AnalysisStatus.Completed;
+        Progress.Stage = TaskStage.Completed;
+        Progress.ProcessedJobs = allJobs.Count;
+        Progress.LastMessage = "任务已完成";
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task<List<BossJobSkillAnalyzer.Models.JobInfo>> ExtractJobListFromPage()
+    {
+        // 向 Content Script 发送消息提取职位列表
+        var response = await JSRuntime.InvokeAsync<object>("chrome.runtime.sendMessage", new
+        {
+            action = "extractJobList"
+        });
+
+        // 这里需要解析响应，暂时返回模拟数据
+        return new List<BossJobSkillAnalyzer.Models.JobInfo>();
+    }
+
+    private async Task<int?> OpenDetailTab(string url)
+    {
+        try
+        {
+            var response = await JSRuntime.InvokeAsync<object>("chrome.runtime.sendMessage", new
+            {
+                action = "openDetailTab",
+                data = new { url = url }
+            });
+
+            // 解析响应获取 tabId
+            return null; // 暂时返回 null
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<BossJobSkillAnalyzer.Models.JobInfo> ExtractJobDetail()
+    {
+        try
+        {
+            var response = await JSRuntime.InvokeAsync<object>("chrome.runtime.sendMessage", new
+            {
+                action = "extractJobDetail"
+            });
+
+            // 解析响应
+            return new BossJobSkillAnalyzer.Models.JobInfo();
+        }
+        catch
+        {
+            return new BossJobSkillAnalyzer.Models.JobInfo();
+        }
+    }
+
+    private async Task CloseTab(int tabId)
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("chrome.runtime.sendMessage", new
+            {
+                action = "closeTab",
+                data = new { tabId = tabId }
+            });
+        }
+        catch { }
+    }
+
+    private async Task GoToNextPage()
+    {
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("chrome.runtime.sendMessage", new
+            {
+                action = "goToNextPage"
+            });
+        }
+        catch { }
+    }
+
+    private async Task ExportJson()
+    {
+        if (Progress?.Result == null) return;
+
+        var json = System.Text.Json.JsonSerializer.Serialize(Progress.Result, new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true
+        });
+
+        // 创建下载
+        await JSRuntime.InvokeVoidAsync("downloadJson", json, $"boss_skill_analysis_{DateTime.Now:yyyyMMdd_HHmmss}.json");
+
+        SuccessMessage = "JSON 导出成功";
+        await Task.Delay(2000);
+        SuccessMessage = string.Empty;
+    }
+
+    public void Dispose()
+    {
+        _cancellationTokenSource?.Cancel();
+        _cancellationTokenSource?.Dispose();
+    }
+}
